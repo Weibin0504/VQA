@@ -1,98 +1,87 @@
-import operator
+import sys
+import os.path
 import argparse
-import json
-from spacy.en import English
 
-def getModalAnswer(answers):
-	candidates = {}
-	for i in range(10):
-		candidates[answers[i]['answer']] = 1
+import numpy as np
+from scipy.misc import imread, imresize
+import scipy.io
 
-	for i in range(10):
-		candidates[answers[i]['answer']] += 1
+parser = argparse.ArgumentParser()
+parser.add_argument('--caffe', help='path to caffe installation')
+parser.add_argument('--model_def', help='path to model definition prototxt')
+parser.add_argument('--model', help='path to model parameters')
+parser.add_argument('--gpu', action='store_true', help='whether to use gpu')
+parser.add_argument('--image', help='path to image')
+parser.add_argument('--features_save_to', help='path to image features')
 
-	return max(candidates.items(), key=operator.itemgetter(1))[0]
+args = parser.parse_args()
 
-def getAllAnswer(answers):
-	answer_list = []
-	for i in range(10):
-		answer_list.append(answers[i]['answer'])
+if args.caffe:
+    caffepath = args.caffe + '/python'
+    sys.path.append(caffepath)
 
-	return ';'.join(answer_list)
+import caffe
 
-def main():
-	parser = argparse.ArgumentParser()
-	parser.add_argument('-split', type=str, default='train', 
-		help='Specify which part of the dataset you want to dump to text. Your options are: train, val, test, test-dev')
-	parser.add_argument('-answers', type=str, default='modal',
-		help='Specify if you want to dump just the most frequent answer for each questions (modal), or all the answers (all)')
-	args = parser.parse_args()
+def predict(in_data, net):
 
-	nlp = English() #used for conting number of tokens
+    out = net.forward(**{net.inputs[0]: in_data})
+    features = out[net.outputs[0]]
+    
+    return features
 
-	if args.split == 'train':
-		annFile = '../data/mscoco_train2014_annotations.json'
-		quesFile = '../data/OpenEnded_mscoco_train2014_questions.json'
-		questions_file = open('../data/preprocessed/questions_train2014.txt', 'wb')
-		questions_id_file = open('../data/preprocessed/questions_id_train2014.txt', 'wb')
-		questions_lengths_file = open('../data/preprocessed/questions_lengths_train2014.txt', 'wb')
-		if args.answers == 'modal':
-			answers_file = open('../data/preprocessed/answers_train2014_modal.txt', 'wb')
-		elif args.answers == 'all':
-			answers_file = open('../data/preprocessed/answers_train2014_all.txt', 'wb')
-		coco_image_id = open('../data/preprocessed/images_train2014.txt', 'wb')
-		data_split = 'training data'
-	elif args.split == 'val':
-		annFile = '../data/mscoco_val2014_annotations.json'
-		quesFile = '../data/OpenEnded_mscoco_val2014_questions.json'
-		questions_file = open('../data/preprocessed/questions_val2014.txt', 'wb')
-		questions_id_file = open('../data/preprocessed/questions_id_val2014.txt', 'wb')
-		questions_lengths_file = open('../data/preprocessed/questions_lengths_val2014.txt', 'wb')
-		if args.answers == 'modal':
-			answers_file = open('../data/preprocessed/answers_val2014_modal.txt', 'wb')
-		elif args.answers == 'all':
-			answers_file = open('../data/preprocessed/answers_val2014_all.txt', 'wb')
-		coco_image_id = open('../data/preprocessed/images_val2014_all.txt', 'wb')
-		data_split = 'validation data'
-	elif args.split == 'test-dev':
-		quesFile = '../data/OpenEnded_mscoco_test-dev2015_questions.json'
-		questions_file = open('../data/preprocessed/questions_test-dev2015.txt', 'wb')
-		questions_id_file = open('../data/preprocessed/questions_id_test-dev2015.txt', 'wb')
-		questions_lengths_file = open('../data/preprocessed/questions_lengths_test-dev2015.txt', 'wb')
-		coco_image_id = open('../data/preprocessed/images_test-dev2015.txt', 'wb')
-		data_split = 'test-dev data'
-	elif args.split == 'test':
-		quesFile = '../data/OpenEnded_mscoco_test2015_questions.json'
-		questions_file = open('../data/preprocessed/questions_test2015.txt', 'wb')
-		questions_id_file = open('../data/preprocessed/questions_id_test2015.txt', 'wb')
-		questions_lengths_file = open('../data/preprocessed/questions_lengths_test2015.txt', 'wb')
-		coco_image_id = open('../data/preprocessed/images_test2015.txt', 'wb')
-		data_split = 'test data'
-	else:
-		raise RuntimeError('Incorrect split. Your choices are:\ntrain\nval\ntest-dev\ntest')
 
-	#initialize VQA api for QA annotations
-	#vqa=VQA(annFile, quesFile)
-	questions = json.load(open(quesFile, 'r'))
-	ques = questions['questions']
-	if args.split == 'train' or args.split == 'val':
-		qa = json.load(open(annFile, 'r'))
-		qa = qa['annotations']
-	
-	print('Dumping questions, answers, questionIDs, imageIDs, and questions lengths to text files...')
-	for i, q in zip(range(len(ques)),ques):
-		questions_file.write((q['question'] + '\n').encode('utf8'))
-		questions_lengths_file.write((str(len(nlp(q['question'])))+ '\n').encode('utf8'))
-		questions_id_file.write((str(q['question_id']) + '\n').encode('utf8'))
-		coco_image_id.write((str(q['image_id']) + '\n').encode('utf8'))
-		if args.split == 'train' or args.split == 'val':
-			if args.answers == 'modal':
-				answers_file.write(getModalAnswer(qa[i]['answers']).encode('utf8'))
-			elif args.answers == 'all':
-				answers_file.write(getAllAnswer(qa[i]['answers']).encode('utf8'))
-			answers_file.write('\n'.encode('utf8'))
+def batch_predict(filenames, net):
 
-	print('completed dumping', data_split)
+    N, C, H, W = net.blobs[net.inputs[0]].data.shape
+    F = net.blobs[net.outputs[0]].data.shape[1]
+    Nf = len(filenames)
+    Hi, Wi, _ = imread(filenames[0]).shape
+    allftrs = np.zeros((Nf, F))
+    for i in range(0, Nf, N):
+        in_data = np.zeros((N, C, H, W), dtype=np.float32)
 
-if __name__ == "__main__":
-	main()
+        batch_range = range(i, min(i+N, Nf))
+        batch_filenames = [filenames[j] for j in batch_range]
+        Nb = len(batch_range)
+
+        batch_images = np.zeros((Nb, 3, H, W))
+        for j,fname in enumerate(batch_filenames):
+            im = imread(fname)
+            if len(im.shape) == 2:
+                im = np.tile(im[:,:,np.newaxis], (1,1,3))
+            # RGB -> BGR
+            im = im[:,:,(2,1,0)]
+            # mean subtraction
+            im = im - np.array([103.939, 116.779, 123.68])
+            # resize
+            im = imresize(im, (H, W), 'bicubic')
+            # get channel in correct dimension
+            im = np.transpose(im, (2, 0, 1))
+            batch_images[j,:,:,:] = im
+
+        # insert into correct place
+        in_data[0:len(batch_range), :, :, :] = batch_images
+
+        # predict features
+        ftrs = predict(in_data, net)
+
+        for j in range(len(batch_range)):
+            allftrs[i+j,:] = ftrs[j,:]
+
+        print 'Done %d/%d files' % (i+len(batch_range), len(filenames))
+        
+    return allftrs
+
+
+if args.gpu:
+    caffe.set_mode_gpu()
+else:
+    caffe.set_mode_cpu()
+
+print 'start caffe'
+net = caffe.Net(args.model_def, args.model, caffe.TEST)
+print 'load image'
+allftrs = batch_predict([args.image], net)
+print 'save mat'
+scipy.io.savemat(args.features_save_to, mdict =  {'feats': np.transpose(allftrs)})
+print 'done'
