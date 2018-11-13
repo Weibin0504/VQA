@@ -19,7 +19,7 @@ def getAllAnswer(answers):
 		answer_list.append(answers[i]['answer'])
 
 	return ';'.join(answer_list)
-
+#
 def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument('-split', type=str, default='train', 
